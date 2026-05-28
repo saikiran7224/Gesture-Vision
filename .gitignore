@@ -1,0 +1,14 @@
+/.venv*
+/Alphabet-ditaction
+/text-write
+
+# macOS system files
+.DS_Store
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Personal captured photos and videos
+capture_*.png
+capture_*.mp4
