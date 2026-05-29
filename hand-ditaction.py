@@ -67,9 +67,15 @@ capture_mode              = "photo"  # "photo" or "video"
 # Video recording configuration
 recording_active          = False
 recording_start_time      = 0.0
-recording_duration        = 5.0      # Record for 5 seconds
+recording_duration        = 10.0     # Record for 10 seconds
 video_writer              = None
 video_filename            = ""
+
+# Filter switch feedback overlay configuration
+filter_switch_text        = ""
+filter_switch_time        = 0.0
+filter_switch_duration    = 1.2      # Show feedback for 1.2 seconds
+filter_switch_color       = (0, 255, 0)
 
 # Pinch detection helper
 prev_both_pinching        = False
@@ -151,47 +157,7 @@ def apply_filter(frame, name):
     return frame.copy()   # "None" -> identical copy
 
 
-def apply_filter_in_box(frame, left_lm, right_lm, w, h, filter_name):
-    """
-    Apply `filter_name` ONLY inside the quadrilateral:
-      TL = left  thumb tip  (lm 4)   L4
-      TR = right thumb tip  (lm 4)   R4
-      BR = right index tip  (lm 8)   R8
-      BL = left  index tip  (lm 8)   L8
-    Outside the box the original frame is kept unchanged.
-    """
-    tl = get_px(left_lm.landmark[4],  w, h)
-    tr = get_px(right_lm.landmark[4], w, h)
-    br = get_px(right_lm.landmark[8], w, h)
-    bl = get_px(left_lm.landmark[8],  w, h)
-
-    pts = np.array([tl, tr, br, bl], dtype=np.int32)
-
-    # Build polygon mask
-    mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.fillPoly(mask, [pts], 255)
-
-    # Apply filter to whole frame, then composite only the box region
-    filtered = apply_filter(frame, filter_name)
-
-    mask3   = cv2.merge([mask, mask, mask])
-    inside  = cv2.bitwise_and(filtered, mask3)
-    outside = cv2.bitwise_and(frame, cv2.bitwise_not(mask3))
-    result  = cv2.add(inside, outside)
-
-    # Draw box border and corner labels
-    cv2.polylines(result, [pts], isClosed=True, color=(0, 255, 255), thickness=2)
-
-    corners = [(tl, "L4", (-20, -12)),
-               (tr, "R4", (  6, -12)),
-               (bl, "L8", (-20,  18)),
-               (br, "R8", (  6,  18))]
-    for pt, label, (ox, oy) in corners:
-        cv2.circle(result, pt, 8, (0, 0, 255), -1)
-        cv2.putText(result, label, (pt[0] + ox, pt[1] + oy),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
-
-    return result
+# apply_filter_in_box was removed as per the requirement to apply filters to the whole frame on pinch.
 
 
 # Main loop
@@ -239,9 +205,7 @@ while True:
             else:
                 left_hand  = hand_lm
 
-            # If not in edit mode, draw landmarks directly on screen
-            if not edit_mode:
-                mp_draw.draw_landmarks(canvas, hand_lm, mp_hands.HAND_CONNECTIONS)
+            # If not in edit mode, main screen landmark drawing is disabled to keep the feed completely clean.
 
             # Gesture analysis coordinates scaled by webcam space for resolution stability
             thumb_tip = hand_lm.landmark[4]
@@ -258,44 +222,67 @@ while True:
                 if dist_index_webcam < 50 and (now - last_switch_time) > cooldown:
                     current_filter = (current_filter + 1) % len(filters)
                     last_switch_time = now
-
-                    cv2.putText(canvas, "NEXT FILTER", (50, 50),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1,
-                                (0, 255, 0), 2)
+                    filter_switch_text = f"NEXT: {filters[current_filter]}"
+                    filter_switch_time = now
 
             # LEFT HAND -> PREVIOUS FILTER
             else:   # mirrored camera -> actual left hand
                 if dist_index_webcam < 50 and (now - last_switch_time) > cooldown:
                     current_filter = (current_filter - 1) % len(filters)
                     last_switch_time = now
+                    filter_switch_text = f"PREV: {filters[current_filter]}"
+                    filter_switch_time = now
 
-                    cv2.putText(canvas, "PREV FILTER", (50, 50),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1,
-                                (0, 165, 255), 2)
+    # Track pinch states for filter activation and media capturing
+    left_pinching = False
+    right_pinching = False
 
-    # Apply filter ONLY inside the box when both hands detected
-    selected = filters[current_filter]
-
-    both_pinching = False
-    if left_hand and right_hand:
-        canvas = apply_filter_in_box(canvas, left_hand, right_hand, target_w, target_h, selected)
-        cv2.putText(canvas, "BOX ACTIVE", (target_w - 185, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
+    if left_hand:
         l_thumb = left_hand.landmark[4]
         l_index = left_hand.landmark[8]
-        # Measure pinch coordinates in stable webcam space
         lx_tw, ly_tw = get_px(l_thumb, w, h)
         lx_iw, ly_iw = get_px(l_index, w, h)
         dist_left = math.hypot(lx_iw - lx_tw, ly_iw - ly_tw)
+        left_pinching = dist_left < 50
 
+    if right_hand:
         r_thumb = right_hand.landmark[4]
         r_index = right_hand.landmark[8]
         rx_tw, ry_tw = get_px(r_thumb, w, h)
         rx_iw, ry_iw = get_px(r_index, w, h)
         dist_right = math.hypot(rx_iw - rx_tw, ry_iw - ry_tw)
+        right_pinching = dist_right < 50
 
-        both_pinching = (dist_left < 50 and dist_right < 50)
+    any_pinching = left_pinching or right_pinching
+    both_pinching = left_pinching and right_pinching
+
+    # Apply filter to the whole frame at all times
+    selected = filters[current_filter]
+    if selected != "None":
+        canvas = apply_filter(clean_frame, selected)
+    else:
+        canvas = clean_frame.copy()
+
+    # Draw hand landmarks only when NOT pinching to keep preview clean during gestures
+    if not any_pinching and results.multi_hand_landmarks and not edit_mode:
+        for hand_lm in results.multi_hand_landmarks:
+            mp_draw.draw_landmarks(canvas, hand_lm, mp_hands.HAND_CONNECTIONS)
+
+    # Render a premium pill feedback overlay at the top for filter switching
+    now = time.time()
+    if now - filter_switch_time < filter_switch_duration:
+        overlay = canvas.copy()
+        (t_w, t_h), _ = cv2.getTextSize(filter_switch_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        pad_x, pad_y = 20, 10
+        cv2.rectangle(overlay, 
+                      (target_w // 2 - t_w // 2 - pad_x, 40 - t_h - pad_y),
+                      (target_w // 2 + t_w // 2 + pad_x, 40 + pad_y),
+                      (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
+        
+        cv2.putText(canvas, filter_switch_text, 
+                    (target_w // 2 - t_w // 2, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, lineType=cv2.LINE_AA)
 
     # Detect edge-triggered pinch event (transition from not-pinching to pinching)
     pinch_event = both_pinching and not prev_both_pinching
